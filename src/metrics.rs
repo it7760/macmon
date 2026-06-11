@@ -2,6 +2,7 @@ use core_foundation::dictionary::CFDictionaryRef;
 
 use serde::Serialize;
 use std::collections::HashMap;
+use sysinfo::{ProcessesToUpdate, System};
 
 use crate::sources::{
   IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
@@ -44,6 +45,14 @@ struct SmcSensors {
 }
 
 #[derive(Debug, Default, Serialize)]
+pub struct ProcessInfo {
+  pub pid: u32,
+  pub name: String,
+  pub cpu_pct: f32,
+  pub mem_bytes: u64,
+}
+
+#[derive(Debug, Default, Serialize)]
 pub struct Metrics {
   pub temp: TempMetrics,
   pub memory: MemMetrics,
@@ -61,6 +70,7 @@ pub struct Metrics {
   pub sys_power: f32,         // Watts
   pub ram_power: f32,         // Watts
   pub gpu_ram_power: f32,     // Watts
+  pub processes: Vec<ProcessInfo>,
 }
 
 // MARK: Helpers
@@ -224,6 +234,7 @@ pub struct Sampler {
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
   smc_fan_keys: Vec<String>,
+  sys: System,
 }
 
 impl Sampler {
@@ -233,6 +244,9 @@ impl Sampler {
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
 
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
     Ok(Sampler {
       soc,
       ior,
@@ -241,6 +255,7 @@ impl Sampler {
       smc_cpu_keys: smc_sensors.cpu_keys,
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
+      sys,
     })
   }
 
@@ -497,6 +512,21 @@ impl Sampler {
       Ok(val) => val.max(rs.all_power),
       Err(_) => 0.0,
     };
+
+    self.sys.refresh_processes(ProcessesToUpdate::All, true);
+    let mut processes: Vec<ProcessInfo> = self
+      .sys
+      .processes()
+      .values()
+      .map(|p| ProcessInfo {
+        pid: p.pid().as_u32(),
+        name: p.name().to_string_lossy().to_string(),
+        cpu_pct: p.cpu_usage(),
+        mem_bytes: p.memory(),
+      })
+      .collect();
+    processes.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
+    rs.processes = processes;
 
     Ok(rs)
   }

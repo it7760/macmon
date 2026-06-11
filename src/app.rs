@@ -10,7 +10,7 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
-use crate::metrics::{FanMetric, Metrics, Sampler, zero_div};
+use crate::metrics::{FanMetric, Metrics, ProcessInfo, Sampler, zero_div};
 use crate::{
   metrics::MemMetrics,
   sources::{SocInfo, get_soc_info},
@@ -222,11 +222,19 @@ fn h_stack(area: Rect) -> (Rect, Rect) {
 
 // MARK: Threads
 
+#[derive(Debug, Default, PartialEq)]
+enum Page {
+  #[default]
+  Dashboard,
+  Processes,
+}
+
 enum Event {
   Update(Metrics),
   ChangeColor,
   ChangeView,
   TogglePerCore,
+  TogglePage,
   IncInterval,
   DecInterval,
   Tick,
@@ -240,6 +248,7 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
     KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
     KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
     KeyCode::Char('d') => Ok(tx.send(Event::TogglePerCore)?),
+    KeyCode::Char('p') => Ok(tx.send(Event::TogglePage)?),
     KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
     KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
     KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
@@ -311,6 +320,9 @@ pub struct App {
   ecpu_freq: Vec<FreqStore>,
   pcpu_freq: Vec<FreqStore>,
   igpu_freq: FreqStore,
+
+  current_page: Page,
+  processes: Vec<ProcessInfo>,
 }
 
 impl App {
@@ -350,6 +362,7 @@ impl App {
     self.fans.push(data.fans);
 
     self.mem.push(data.memory);
+    self.processes = data.processes;
   }
 
   fn title_block<'a>(&self, label_l: &str, label_r: &str) -> Block<'a> {
@@ -616,7 +629,7 @@ impl App {
     }
   }
 
-  fn render(&mut self, f: &mut Frame) {
+  fn render_dashboard(&mut self, f: &mut Frame) {
     let label_l = format!(
       "{} ({}{}+{}{}+{}GPU {}GB)",
       self.soc.chip_name,
@@ -690,7 +703,7 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" q quit | c color | v chart | d detail | -/+ {}ms ", self.cfg.interval);
+    let usage = format!(" q quit | c color | v chart | d detail | p processes | -/+ {}ms ", self.cfg.interval);
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
@@ -703,6 +716,52 @@ impl App {
     f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last()), ha[0]);
     f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last()), ha[1]);
     f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
+  }
+
+  fn render_processes(&self, f: &mut Frame) {
+    let area = f.area();
+    let label_l = format!("{} Processes", self.processes.len());
+    let brand = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    let hint = " q quit | p dashboard ";
+
+    let header = Row::new(vec!["PID", "Name", "CPU %", "Mem (RSS)"])
+      .style(Style::default().fg(self.cfg.color).bold());
+
+    let available_rows = area.height.saturating_sub(4) as usize; // borders + header
+    let rows: Vec<Row> = self
+      .processes
+      .iter()
+      .take(available_rows)
+      .map(|p| {
+        Row::new(vec![
+          p.pid.to_string(),
+          p.name.clone(),
+          format!("{:.1}", p.cpu_pct),
+          format!("{:.1} MB", p.mem_bytes as f64 / (1024.0 * 1024.0)),
+        ])
+      })
+      .collect();
+
+    let widths = [
+      Constraint::Length(8),
+      Constraint::Fill(1),
+      Constraint::Length(8),
+      Constraint::Length(12),
+    ];
+
+    let block = self
+      .title_block(&label_l, &brand)
+      .title_bottom(Line::from(hint).right_aligned());
+
+    let table = Table::new(rows, widths).block(block).header(header);
+    f.render_widget(table, area);
+  }
+
+  fn render(&mut self, f: &mut Frame) {
+    match self.current_page {
+      Page::Dashboard => self.render_dashboard(f),
+      Page::Processes => self.render_processes(f),
+    }
   }
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
@@ -725,6 +784,12 @@ impl App {
         Event::ChangeColor => self.cfg.next_color(),
         Event::ChangeView => self.cfg.next_view_type(),
         Event::TogglePerCore => self.cfg.toggle_per_core_view(),
+        Event::TogglePage => {
+          self.current_page = match self.current_page {
+            Page::Dashboard => Page::Processes,
+            Page::Processes => Page::Dashboard,
+          };
+        }
         Event::IncInterval => {
           self.cfg.inc_interval();
           *msec.write().unwrap() = self.cfg.interval;
