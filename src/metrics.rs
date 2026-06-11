@@ -70,6 +70,7 @@ pub struct Metrics {
   pub sys_power: f32,         // Watts
   pub ram_power: f32,         // Watts
   pub gpu_ram_power: f32,     // Watts
+  #[serde(skip)]              // Skipped in JSON output to reduce size
   pub processes: Vec<ProcessInfo>,
 }
 
